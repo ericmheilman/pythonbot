@@ -1,0 +1,4 @@
+Traceback (most recent call last):
+  File "/Users/ericheilman/python-bot/bot.py", line 1, in <module>
+    import ccxt
+ModuleNotFoundError: No module named 'ccxt'
