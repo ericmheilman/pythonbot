@@ -4,7 +4,7 @@
 BOT_NAME="bot.py"
 
 # Define the path to the Python interpreter inside the virtual environment
-VENV_PYTHON="./trading_bot_env/bin/python3"
+VENV_PYTHON="/Users/ericheilman/python-bot/trading_bot_env/bin/python3"
 
 # Step 1: Check if the bot is running
 echo "Checking if $BOT_NAME is running..."

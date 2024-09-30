@@ -2,6 +2,7 @@ import ccxt
 import pandas as pd
 import pandas_ta as ta
 import backtrader as bt
+import datetime
 
 # Step 1: Fetch real-time data from Binance (or other exchange)
 exchange = ccxt.binance()
@@ -30,7 +31,6 @@ def calculate_indicators(df):
     
     return df
 
-
 # Step 3: Trading logic based on strategy
 def check_trading_signals(df):
     signals = []
@@ -55,29 +55,80 @@ def check_trading_signals(df):
 
     return signals
 
-# Step 4: Backtesting logic using Backtrader
 class SolanaStrategy(bt.Strategy):
+    params = (
+        ('macd_fast', 12),
+        ('macd_slow', 26),
+        ('macd_signal', 9),
+        ('rsi_overbought', 70),  # Overbought threshold for RSI
+        ('rsi_oversold', 30),    # Oversold threshold for RSI
+        ('adx_threshold', 25),   # ADX threshold
+    )
+    
     def __init__(self):
+        # MACD indicator
+        self.macd = bt.indicators.MACD(
+            period_me1=self.params.macd_fast, 
+            period_me2=self.params.macd_slow, 
+            period_signal=self.params.macd_signal
+        )
+        
+        # Bollinger Bands
         self.bbands = bt.indicators.BollingerBands(period=20, devfactor=2)
-        self.macd = bt.indicators.MACD()
+        
+        # RSI and other indicators
         self.rsi = bt.indicators.RSI_Safe()
         self.adx = bt.indicators.ADX()
         self.atr = bt.indicators.ATR()
 
     def next(self):
-        if self.data.close[0] > self.bbands.lines.top[0]:  # Long signal
+        # Buy signal
+        if self.data.close[0] > self.bbands.lines.top[0] and self.rsi[0] < self.params.rsi_overbought and self.adx[0] > self.params.adx_threshold:
             self.buy()
-        if self.data.close[0] < self.bbands.lines.bot[0]:  # Short signal
+
+        # Sell signal
+        if self.data.close[0] < self.bbands.lines.bot[0] and self.rsi[0] > self.params.rsi_oversold and self.adx[0] > self.params.adx_threshold:
             self.sell()
 
-# Step 5: Running the strategy
+# Backtesting
 def run_backtest(df):
     cerebro = bt.Cerebro()
     data = bt.feeds.PandasData(dataname=df)
+
     cerebro.adddata(data)
     cerebro.addstrategy(SolanaStrategy)
-    cerebro.broker.set_cash(10000)
-    cerebro.run()
+    cerebro.broker.set_cash(10000)  # Starting capital
+
+    # Add analyzers for performance metrics
+    cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name="trade_analyzer")
+    cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name="sharpe_ratio")
+    cerebro.addanalyzer(bt.analyzers.DrawDown, _name="drawdown")
+
+    print("Starting Portfolio Value: %.2f" % cerebro.broker.getvalue())
+
+    # Run the strategy
+    results = cerebro.run()
+
+    # Get final portfolio value
+    final_portfolio_value = cerebro.broker.getvalue()
+    print("Final Portfolio Value: %.2f" % final_portfolio_value)
+
+    # Extract analyzers for performance metrics
+    trade_analyzer = results[0].analyzers.trade_analyzer.get_analysis()
+    sharpe_ratio = results[0].analyzers.sharpe_ratio.get_analysis()
+    drawdown = results[0].analyzers.drawdown.get_analysis()
+
+    # Print the performance analysis
+    print("\nTrade Analysis Results:")
+    print(trade_analyzer)
+
+    print("\nSharpe Ratio:")
+    print(sharpe_ratio)
+
+    print("\nDrawdown Analysis:")
+    print(drawdown)
+
+    # Plot the strategy results
     cerebro.plot()
 
 if __name__ == "__main__":
@@ -86,4 +137,3 @@ if __name__ == "__main__":
     signals = check_trading_signals(df)
     print(signals)
     run_backtest(df)
-EOT
