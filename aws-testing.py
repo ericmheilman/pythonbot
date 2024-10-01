@@ -17,15 +17,6 @@ file_handler.setLevel(logging.DEBUG)
 file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
 logger.addHandler(file_handler)
 
-# Adjusted strategy categories with slightly increased data limits for better model training
-COMPLEXITY_DIVIDER = 20
-strategy_categories = {
-    "Scalping": {"timeframe": "1m", "history_limit": 500},  # Increased data size
-    "Swing Trading": {"timeframe": "1h", "history_limit": 500},
-    "Position Trading": {"timeframe": "1d", "history_limit": 500},
-    "Day Trading": {"timeframe": "15m", "history_limit": 500},
-}
-
 # Placeholder to store profitable strategies
 profitable_strategies_db = []
 
@@ -150,14 +141,34 @@ def evaluate_ga_strategy(individual):
 # Main function to run the backtesting and ranking
 def main():
     logger.info("Running Genetic Algorithm for SOL/USDT")
+
+    # Maximize the number of workers using all available CPU cores
+    max_workers = multiprocessing.cpu_count()
+
     toolbox = setup_ga()
     population = toolbox.population(n=50)  # Increased population size
-    algorithms.eaSimple(population, toolbox, cxpb=0.6, mutpb=0.3, ngen=50, verbose=False)  # Increased generations
 
+    # Running Genetic Algorithm with parallel processing
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_populations = [
+            executor.submit(algorithms.eaSimple, population, toolbox, cxpb=0.6, mutpb=0.3, ngen=50, verbose=False)
+            for _ in range(max_workers)
+        ]
+
+        for future in future_populations:
+            future.result()
+
+    # After parallel execution, get the top-ranked strategies
     ranked_strategies = sorted(population, key=lambda ind: ind.fitness.values[0], reverse=True)
     for strategy in ranked_strategies[:3]:  # Top 3 strategies
         profit = evaluate_ga_strategy(strategy)
         profitable_strategies_db.append(('Genetic Algorithm', strategy, profit))
+
+    # Log final results
+    logger.info("\nTop Profitable Strategies:")
+    profitable_strategies_db.sort(key=lambda x: x[2], reverse=True)
+    for i, (algo, strategy, profit) in enumerate(profitable_strategies_db[:10], 1):
+        logger.info(f"Rank {i}: Algorithm: {algo}, Strategy: {strategy}, Profit: {profit}")
 
 if __name__ == "__main__":
     main()
