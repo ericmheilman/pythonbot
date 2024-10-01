@@ -1,81 +1,76 @@
+import ccxt
 import random
 import backtrader as bt
 import pandas as pd
-import numpy as np
+import logging
 from deap import base, creator, tools, algorithms
-from sklearn.neural_network import MLPRegressor
-from sklearn.svm import SVR
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.tree import DecisionTreeRegressor
-from sklearn.neighbors import KNeighborsRegressor
-from sklearn.model_selection import train_test_split
 
-# Example trading categories
-strategy_categories = {
-    "Scalping": {"timeframe": "1m", "history_limit": 5000},
-    "Swing Trading": {"timeframe": "1h", "history_limit": 1000},
-    "Position Trading": {"timeframe": "1d", "history_limit": 365},
-    "Day Trading": {"timeframe": "15m", "history_limit": 2000},
-}
+# Set up logging
+logging.basicConfig(level=logging.INFO, format='%(message)s')
+logger = logging.getLogger()
 
-# Predefined strategies
-common_strategies = [
-    {'macd_fast': 12, 'macd_slow': 26, 'macd_signal': 9, 'rsi_overbought': 70, 'rsi_oversold': 30, 'adx_threshold': 25, 'target_profit': 1.5, 'atr_multiplier': 2.0},
-    {'macd_fast': 8, 'macd_slow': 26, 'macd_signal': 9, 'rsi_overbought': 65, 'rsi_oversold': 35, 'adx_threshold': 25, 'target_profit': 2, 'atr_multiplier': 2.5},
-]
+# File handler for verbose logging
+file_handler = logging.FileHandler('backtest.log')
+file_handler.setLevel(logging.DEBUG)
+file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+logger.addHandler(file_handler)
 
-# Fetch price data
+# Simplified for a single strategy (Scalping) and a single symbol (SOL/USDT)
+strategy_category = {"timeframe": "1m", "history_limit": 500}  # Using the "Scalping" strategy
+
+# Placeholder to store profitable strategies
+profitable_strategies_db = []
+
+# Fetch data for a single symbol and timeframe
 def fetch_data(symbol, timeframe, limit):
-    # For demonstration, replace this with real price data fetching logic
-    dates = pd.date_range(start="2023-01-01", periods=limit, freq='T')
-    prices = np.random.normal(loc=20, scale=5, size=limit)  # Fake price data
-    df = pd.DataFrame({"timestamp": dates, "open": prices, "high": prices, "low": prices, "close": prices})
-    df.set_index("timestamp", inplace=True)
+    exchange = ccxt.binance()
+
+    if not '/' in symbol:
+        raise ValueError(f"Unsupported symbol format: {symbol}")
+
+    logger.debug(f"Fetching {limit} bars for {symbol} on {timeframe} timeframe")
+    ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+    df.set_index('timestamp', inplace=True)
     return df
 
-# Evaluate strategy using backtest results
-def evaluate_strategy(individual):
-    # Ensure periods are valid
-    macd_fast = max(1, individual[0])
-    macd_slow = max(macd_fast + 1, individual[1])
-    macd_signal = max(1, individual[2])
-    rsi_overbought = individual[3]
-    rsi_oversold = individual[4]
-    adx_threshold = individual[5]
-    target_profit = individual[6]
-    atr_multiplier = individual[7]
-    
-    strategy = {
-        'macd_fast': macd_fast,
-        'macd_slow': macd_slow,
-        'macd_signal': macd_signal,
-        'rsi_overbought': rsi_overbought,
-        'rsi_oversold': rsi_oversold,
-        'adx_threshold': adx_threshold,
-        'target_profit': target_profit,
-        'atr_multiplier': atr_multiplier,
-    }
-    
-    df = fetch_data(symbol='SOL/USDT', timeframe='1m', limit=5000)
-    profit = backtest_strategy(strategy, df)
-    return profit,
-
-# Backtest function for strategy profitability
-def backtest_strategy(strategy, df):
+# Backtest a strategy using Backtrader
+def backtest_strategy(strategy, df, symbol):
     cerebro = bt.Cerebro()
 
+    # Adding slippage and commission settings to make backtest more realistic
+    cerebro.broker.set_slippage_perc(0.001)  # 0.1% slippage
+    cerebro.broker.setcommission(commission=0.001)  # 0.1% commission per trade
+
     class TestStrategy(bt.Strategy):
+        params = (
+            ('macd_fast', 3),  # Shorter MACD periods
+            ('macd_slow', 9),
+            ('macd_signal', 3),
+            ('rsi_overbought', 65),  # Lower overbought threshold for short-term trading
+            ('rsi_oversold', 35),  # Lower oversold threshold for short-term trading
+            ('adx_threshold', 20),  # Lower ADX threshold
+        )
+
         def __init__(self):
-            self.macd = bt.indicators.MACD(period_me1=strategy['macd_fast'], period_me2=strategy['macd_slow'], period_signal=strategy['macd_signal'])
+            self.macd = bt.indicators.MACD(
+                period_me1=max(1, strategy['macd_fast']),
+                period_me2=max(strategy['macd_fast'] + 1, strategy['macd_slow']),
+                period_signal=max(1, strategy['macd_signal'])
+            )
             self.rsi = bt.indicators.RSI_Safe()
             self.adx = bt.indicators.ADX()
-            self.atr = bt.indicators.ATR()
 
         def next(self):
-            if self.rsi[0] < strategy['rsi_oversold'] and self.adx[0] > strategy['adx_threshold']:
-                self.buy()
-            elif self.rsi[0] > strategy['rsi_overbought'] and self.adx[0] > strategy['adx_threshold']:
-                self.sell()
+            if not self.position:  # Not already in a position
+                if self.rsi[0] < strategy['rsi_oversold'] and self.adx[0] > strategy['adx_threshold']:
+                    self.buy()
+                    logger.debug(f"Buy at {self.data.close[0]} on {self.data.datetime.datetime(0)}")
+            elif self.position:  # Already in a position
+                if self.rsi[0] > strategy['rsi_overbought'] and self.adx[0] > strategy['adx_threshold']:
+                    self.sell()
+                    logger.debug(f"Sell at {self.data.close[0]} on {self.data.datetime.datetime(0)}")
 
     data = bt.feeds.PandasData(dataname=df)
     cerebro.adddata(data)
@@ -83,50 +78,72 @@ def backtest_strategy(strategy, df):
     cerebro.broker.set_cash(10000)
     cerebro.run()
 
-    final_value = cerebro.broker.getvalue()
-    return final_value - 10000  # Return profit
+    profit = cerebro.broker.getvalue() - 10000
+    logger.info(f"Profit for {symbol}: {profit}")
+    return profit
 
-# Genetic Algorithm setup
+# Define the Genetic Algorithm (GA) setup
 def setup_ga():
-    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
-    creator.create("Individual", list, fitness=creator.FitnessMax)
+    if not hasattr(creator, 'FitnessMax'):
+        creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+    if not hasattr(creator, 'Individual'):
+        creator.create("Individual", list, fitness=creator.FitnessMax)
 
     toolbox = base.Toolbox()
-    toolbox.register("attr_macd_fast", random.randint, 6, 15)
-    toolbox.register("attr_macd_slow", random.randint, 20, 30)
-    toolbox.register("attr_macd_signal", random.randint, 5, 12)
-    toolbox.register("attr_rsi_overbought", random.randint, 60, 80)
-    toolbox.register("attr_rsi_oversold", random.randint, 20, 40)
-    toolbox.register("attr_adx_threshold", random.randint, 20, 35)
+    toolbox.register("attr_macd_fast", random.randint, 2, 5)  # Narrower range for fast MACD
+    toolbox.register("attr_macd_slow", random.randint, 6, 12)  # Narrower range for slow MACD
+    toolbox.register("attr_macd_signal", random.randint, 3, 6)
+    toolbox.register("attr_rsi_overbought", random.randint, 60, 75)
+    toolbox.register("attr_rsi_oversold", random.randint, 25, 40)
+    toolbox.register("attr_adx_threshold", random.randint, 15, 30)
     toolbox.register("attr_target_profit", random.uniform, 1.5, 3.0)
-    toolbox.register("attr_atr_multiplier", random.uniform, 1.5, 3.0)
 
     toolbox.register("individual", tools.initCycle, creator.Individual, 
                      (toolbox.attr_macd_fast, toolbox.attr_macd_slow, toolbox.attr_macd_signal, 
                       toolbox.attr_rsi_overbought, toolbox.attr_rsi_oversold, toolbox.attr_adx_threshold, 
-                      toolbox.attr_target_profit, toolbox.attr_atr_multiplier), n=1)
+                      toolbox.attr_target_profit), n=1)
 
     toolbox.register("population", tools.initRepeat, list, toolbox.individual)
-    toolbox.register("evaluate", evaluate_strategy)
+    toolbox.register("evaluate", evaluate_ga_strategy)
     toolbox.register("mate", tools.cxTwoPoint)
-    toolbox.register("mutate", tools.mutFlipBit, indpb=0.05)
-    toolbox.register("select", tools.selTournament, tournsize=3)
+    toolbox.register("mutate", tools.mutFlipBit, indpb=0.15)  # Increased mutation probability for exploration
+    toolbox.register("select", tools.selTournament, tournsize=5)  # Increased tournament size
 
     return toolbox
 
-# Main function to run GA
+# Evaluate strategy generated by GA
+def evaluate_ga_strategy(individual):
+    strategy = {
+        'macd_fast': max(1, individual[0]),
+        'macd_slow': max(individual[0] + 1, individual[1]),
+        'macd_signal': max(1, individual[2]),
+        'rsi_overbought': individual[3],
+        'rsi_oversold': individual[4],
+        'adx_threshold': individual[5],
+        'target_profit': individual[6],
+    }
+
+    df = fetch_data(symbol='SOL/USDT', timeframe='1m', limit=500)  # Single symbol and strategy category
+    profit = backtest_strategy(strategy, df, 'SOL/USDT')
+    return profit,
+
+# Main function to run the backtesting and ranking for one strategy and one symbol
 def main():
+    logger.info("Running Genetic Algorithm for SOL/USDT on Scalping")
     toolbox = setup_ga()
-    population = toolbox.population(n=100)
-    algorithms.eaSimple(population, toolbox, cxpb=0.5, mutpb=0.2, ngen=50, verbose=True)
+    population = toolbox.population(n=50)  # Increased population size
+    algorithms.eaSimple(population, toolbox, cxpb=0.6, mutpb=0.3, ngen=50, verbose=False)  # Increased generations
 
-    # Rank strategies by profitability
     ranked_strategies = sorted(population, key=lambda ind: ind.fitness.values[0], reverse=True)
+    for strategy in ranked_strategies[:3]:  # Top 3 strategies
+        profit = evaluate_ga_strategy(strategy)
+        profitable_strategies_db.append(('Genetic Algorithm', strategy, profit))
 
-    # Print top strategies
-    print("\nTop 10 Strategies:")
-    for i, strategy in enumerate(ranked_strategies[:10], 1):
-        print(f"Rank {i}: Strategy {strategy}, Profit: {strategy.fitness.values[0]}")
+    # Print top profitable strategies
+    logger.info("\nTop Profitable Strategies:")
+    profitable_strategies_db.sort(key=lambda x: x[2], reverse=True)
+    for i, (algo, strategy, profit) in enumerate(profitable_strategies_db[:3], 1):
+        logger.info(f"Rank {i}: Algorithm: {algo}, Strategy: {strategy}, Profit: {profit}")
 
 if __name__ == "__main__":
     main()

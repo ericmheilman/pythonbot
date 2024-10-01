@@ -2,17 +2,8 @@ import ccxt
 import random
 import backtrader as bt
 import pandas as pd
-import numpy as np
 import logging
 from deap import base, creator, tools, algorithms
-from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor, AdaBoostRegressor
-from xgboost import XGBRegressor
-from sklearn.neural_network import MLPRegressor
-from sklearn.svm import SVR
-from sklearn.tree import DecisionTreeRegressor
-from sklearn.neighbors import KNeighborsRegressor
-from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import train_test_split
 from concurrent.futures import ThreadPoolExecutor
 
 # Set up logging
@@ -25,21 +16,17 @@ file_handler.setLevel(logging.DEBUG)
 file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
 logger.addHandler(file_handler)
 
-# Example trading categories with slightly increased data limits for better model training
-COMPLEXITY_DIVIDER = 5
+# Adjusted strategy categories with slightly increased data limits for better model training
+COMPLEXITY_DIVIDER = 20
 strategy_categories = {
-    "Scalping": {"timeframe": "1m", "history_limit": 1000 / COMPLEXITY_DIVIDER},
-    "Swing Trading": {"timeframe": "1h", "history_limit": 500/ COMPLEXITY_DIVIDER},
-    "Position Trading": {"timeframe": "1d", "history_limit": 200/ COMPLEXITY_DIVIDER},
-    "Day Trading": {"timeframe": "15m", "history_limit": 500/ COMPLEXITY_DIVIDER},
+    "Scalping": {"timeframe": "1m", "history_limit": 500},  # Increased data size
+    "Swing Trading": {"timeframe": "1h", "history_limit": 500},
+    "Position Trading": {"timeframe": "1d", "history_limit": 500},
+    "Day Trading": {"timeframe": "15m", "history_limit": 500},
 }
 
 # Placeholder to store profitable strategies
 profitable_strategies_db = []
-
-# Algorithms to iterate over
-algorithms_list = ['Genetic Algorithm', 'Random Forest', 'Neural Network', 'SVM', 'Decision Tree',
-                   'Gradient Boosting', 'AdaBoost', 'KNN', 'XGBoost', 'Logistic Regression']
 
 # Fetch data directly without using a map
 def fetch_data(symbol, timeframe, limit):
@@ -59,14 +46,18 @@ def fetch_data(symbol, timeframe, limit):
 def backtest_strategy(strategy, df, symbol):
     cerebro = bt.Cerebro()
 
+    # Adding slippage and commission settings to make backtest more realistic
+    cerebro.broker.set_slippage_perc(0.001)  # 0.1% slippage
+    cerebro.broker.setcommission(commission=0.001)  # 0.1% commission per trade
+
     class TestStrategy(bt.Strategy):
         params = (
-            ('macd_fast', 12),
-            ('macd_slow', 26),
-            ('macd_signal', 9),
-            ('rsi_overbought', 70),
-            ('rsi_oversold', 30),
-            ('adx_threshold', 25),
+            ('macd_fast', 3),  # Shorter MACD periods
+            ('macd_slow', 9),
+            ('macd_signal', 3),
+            ('rsi_overbought', 65),  # Lower overbought threshold for short-term trading
+            ('rsi_oversold', 35),  # Lower oversold threshold for short-term trading
+            ('adx_threshold', 20),  # Lower ADX threshold
         )
 
         def __init__(self):
@@ -77,7 +68,6 @@ def backtest_strategy(strategy, df, symbol):
             )
             self.rsi = bt.indicators.RSI_Safe()
             self.adx = bt.indicators.ADX()
-            self.atr = bt.indicators.ATR()
 
         def next(self):
             if not self.position:  # Not already in a position
@@ -107,25 +97,24 @@ def setup_ga():
         creator.create("Individual", list, fitness=creator.FitnessMax)
 
     toolbox = base.Toolbox()
-    toolbox.register("attr_macd_fast", random.randint, 6, 15)
-    toolbox.register("attr_macd_slow", random.randint, 20, 30)
-    toolbox.register("attr_macd_signal", random.randint, 5, 12)
-    toolbox.register("attr_rsi_overbought", random.randint, 60, 80)
-    toolbox.register("attr_rsi_oversold", random.randint, 20, 40)
-    toolbox.register("attr_adx_threshold", random.randint, 20, 35)
+    toolbox.register("attr_macd_fast", random.randint, 2, 5)  # Narrower range for fast MACD
+    toolbox.register("attr_macd_slow", random.randint, 6, 12)  # Narrower range for slow MACD
+    toolbox.register("attr_macd_signal", random.randint, 3, 6)
+    toolbox.register("attr_rsi_overbought", random.randint, 60, 75)
+    toolbox.register("attr_rsi_oversold", random.randint, 25, 40)
+    toolbox.register("attr_adx_threshold", random.randint, 15, 30)
     toolbox.register("attr_target_profit", random.uniform, 1.5, 3.0)
-    toolbox.register("attr_atr_multiplier", random.uniform, 1.5, 3.0)
 
     toolbox.register("individual", tools.initCycle, creator.Individual, 
                      (toolbox.attr_macd_fast, toolbox.attr_macd_slow, toolbox.attr_macd_signal, 
                       toolbox.attr_rsi_overbought, toolbox.attr_rsi_oversold, toolbox.attr_adx_threshold, 
-                      toolbox.attr_target_profit, toolbox.attr_atr_multiplier), n=1)
+                      toolbox.attr_target_profit), n=1)
 
     toolbox.register("population", tools.initRepeat, list, toolbox.individual)
     toolbox.register("evaluate", evaluate_ga_strategy)
     toolbox.register("mate", tools.cxTwoPoint)
-    toolbox.register("mutate", tools.mutFlipBit, indpb=0.1)  # Increased mutation probability for exploration
-    toolbox.register("select", tools.selTournament, tournsize=4)  # Higher tournament size for quality selection
+    toolbox.register("mutate", tools.mutFlipBit, indpb=0.15)  # Increased mutation probability for exploration
+    toolbox.register("select", tools.selTournament, tournsize=5)  # Increased tournament size
 
     return toolbox
 
@@ -139,53 +128,32 @@ def evaluate_ga_strategy(individual):
         'rsi_oversold': individual[4],
         'adx_threshold': individual[5],
         'target_profit': individual[6],
-        'atr_multiplier': individual[7],
     }
 
-    df = fetch_data(symbol='SOL/USDT', timeframe='1m', limit=1000)
+    df = fetch_data(symbol='SOL/USDT', timeframe='1m', limit=500)  # Increased limit for more meaningful results
     profit = backtest_strategy(strategy, df, 'SOL/USDT')
     return profit,
 
 # Pull historical data for SOL, ETH, and BTC
 def pull_historical_data():
-    sol_data = fetch_data('SOL/USDT', '1m', 1000)
-    eth_data = fetch_data('ETH/USDT', '1m', 1000)
-    btc_data = fetch_data('BTC/USDT', '1m', 1000)
+    sol_data = fetch_data('SOL/USDT', '1m', 500)  # Increased limit
+    eth_data = fetch_data('ETH/USDT', '1m', 500)  # Increased limit
+    btc_data = fetch_data('BTC/USDT', '1m', 500)  # Increased limit
     return {'SOL/USDT': sol_data, 'ETH/USDT': eth_data, 'BTC/USDT': btc_data}
 
-# Run AI algorithms for each trading category and each algorithm
+# Run Genetic Algorithm (GA)
 def run_algorithm_backtests(symbol, category, params):
     df = fetch_data(symbol=symbol, timeframe=params['timeframe'], limit=params['history_limit'])
 
-    for algo in algorithms_list:
-        logger.info(f"Running {algo} for {symbol} on {category}")
-        for model_num in range(2):  # Test two models per algorithm for better quality
-            if algo == 'Genetic Algorithm':
-                toolbox = setup_ga()
-                population = toolbox.population(n=20)  # Increased population size for higher quality
-                algorithms.eaSimple(population, toolbox, cxpb=0.6, mutpb=0.3, ngen=10, verbose=False)  # Increased generations
+    logger.info(f"Running Genetic Algorithm for {symbol} on {category}")
+    toolbox = setup_ga()
+    population = toolbox.population(n=50)  # Increased population size
+    algorithms.eaSimple(population, toolbox, cxpb=0.6, mutpb=0.3, ngen=50, verbose=False)  # Increased generations
 
-                ranked_strategies = sorted(population, key=lambda ind: ind.fitness.values[0], reverse=True)
-                for strategy in ranked_strategies[:3]:  # Top 3 strategies
-                    profit = evaluate_ga_strategy(strategy)
-                    profitable_strategies_db.append((algo, strategy, profit))
-            else:
-                # Train AI models with deeper settings
-                if algo == 'Random Forest':
-                    model = RandomForestRegressor(n_estimators=100, max_depth=10)
-                elif algo == 'Neural Network':
-                    model = MLPRegressor(hidden_layer_sizes=(200, 100), max_iter=500)
-                elif algo == 'XGBoost':
-                    model = XGBRegressor(n_estimators=100, max_depth=8)
-                elif algo == 'SVM':
-                    model = SVR(C=1.0, epsilon=0.1)
-                # More algorithms can be handled similarly...
-
-                # Use the backtest results as training data, fit models, and store profit
-                X_train, X_test, y_train, y_test = train_test_split(df[['open', 'high', 'low', 'close']], df['close'], test_size=0.2)
-                model.fit(X_train, y_train)
-                score = model.score(X_test, y_test)
-                profitable_strategies_db.append((algo, model, score))
+    ranked_strategies = sorted(population, key=lambda ind: ind.fitness.values[0], reverse=True)
+    for strategy in ranked_strategies[:3]:  # Top 3 strategies
+        profit = evaluate_ga_strategy(strategy)
+        profitable_strategies_db.append(('Genetic Algorithm', strategy, profit))
 
 # Main function to run the backtesting and ranking
 def main():
@@ -194,7 +162,7 @@ def main():
     # Use ThreadPoolExecutor to parallelize backtests
     with ThreadPoolExecutor(max_workers=4) as executor:
         futures = []
-        total_tests = len(historical_data) * len(strategy_categories) * len(algorithms_list)
+        total_tests = len(historical_data) * len(strategy_categories)  # Only running GA
         completed_tests = 0
 
         for symbol, data in historical_data.items():
