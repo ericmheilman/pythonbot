@@ -1,8 +1,8 @@
-import ccxt
 import random
 import backtrader as bt
 import pandas as pd
 import logging
+from pycoingecko import CoinGeckoAPI
 from deap import base, creator, tools, algorithms
 from concurrent.futures import ThreadPoolExecutor
 import multiprocessing  # To get the number of available CPUs
@@ -29,18 +29,30 @@ strategy_categories = {
 # Placeholder to store profitable strategies
 profitable_strategies_db = []
 
-# Fetch data directly without using a map
-def fetch_data(symbol, timeframe, limit):
-    exchange = ccxt.binance()
+# Fetch data using CoinGecko API
+def fetch_data(symbol, vs_currency='usd', days='1'):
+    cg = CoinGeckoAPI()
+    
+    # Convert symbol to lowercase to match CoinGecko format
+    symbol = symbol.lower()
 
-    if not '/' in symbol:
-        raise ValueError(f"Unsupported symbol format: {symbol}")
+    logger.debug(f"Fetching {days} days of data for {symbol}")
+    
+    # Fetch historical market data from CoinGecko
+    historical_data = cg.get_coin_market_chart_by_id(id=symbol, vs_currency=vs_currency, days=days)
 
-    logger.debug(f"Fetching {limit} bars for {symbol} on {timeframe} timeframe")
-    ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    # Create a DataFrame from the price data
+    df = pd.DataFrame(historical_data['prices'], columns=['timestamp', 'price'])
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
     df.set_index('timestamp', inplace=True)
+
+    # Add open, high, low, close, and volume columns to match Backtrader's expected format
+    df['open'] = df['price']
+    df['high'] = df['price']
+    df['low'] = df['price']
+    df['close'] = df['price']
+    df['volume'] = 1  # CoinGecko doesn't provide volume in this endpoint, so we use a placeholder
+
     return df
 
 # Backtest a strategy using Backtrader
@@ -131,22 +143,13 @@ def evaluate_ga_strategy(individual):
         'target_profit': individual[6],
     }
 
-    df = fetch_data(symbol='SOL/USDT', timeframe='1m', limit=500)  # Increased limit for more meaningful results
+    df = fetch_data(symbol='solana', days='1')  # Fetching data from CoinGecko for 1 day
     profit = backtest_strategy(strategy, df, 'SOL/USDT')
     return profit,
 
-# Pull historical data for SOL, ETH, and BTC
-def pull_historical_data():
-    sol_data = fetch_data('SOL/USDT', '1m', 500)  # Increased limit
-    eth_data = fetch_data('ETH/USDT', '1m', 500)  # Increased limit
-    btc_data = fetch_data('BTC/USDT', '1m', 500)  # Increased limit
-    return {'SOL/USDT': sol_data, 'ETH/USDT': eth_data, 'BTC/USDT': btc_data}
-
-# Run Genetic Algorithm (GA)
-def run_algorithm_backtests(symbol, category, params):
-    df = fetch_data(symbol=symbol, timeframe=params['timeframe'], limit=params['history_limit'])
-
-    logger.info(f"Running Genetic Algorithm for {symbol} on {category}")
+# Main function to run the backtesting and ranking
+def main():
+    logger.info("Running Genetic Algorithm for SOL/USDT")
     toolbox = setup_ga()
     population = toolbox.population(n=50)  # Increased population size
     algorithms.eaSimple(population, toolbox, cxpb=0.6, mutpb=0.3, ngen=50, verbose=False)  # Increased generations
@@ -155,32 +158,6 @@ def run_algorithm_backtests(symbol, category, params):
     for strategy in ranked_strategies[:3]:  # Top 3 strategies
         profit = evaluate_ga_strategy(strategy)
         profitable_strategies_db.append(('Genetic Algorithm', strategy, profit))
-
-# Main function to run the backtesting and ranking
-def main():
-    historical_data = pull_historical_data()
-
-    # Use ThreadPoolExecutor to parallelize backtests
-    max_threads = multiprocessing.cpu_count()  # Maximize thread count
-    with ThreadPoolExecutor(max_workers=max_threads) as executor:
-        futures = []
-        total_tests = len(historical_data) * len(strategy_categories)  # Only running GA
-        completed_tests = 0
-
-        for symbol, data in historical_data.items():
-            for category, params in strategy_categories.items():
-                futures.append(executor.submit(run_algorithm_backtests, symbol, category, params))
-
-        for future in futures:
-            future.result()
-            completed_tests += 1
-            logger.info(f"Progress: {completed_tests}/{total_tests} tests completed.")
-
-    # Print top profitable strategies
-    logger.info("\nTop Profitable Strategies:")
-    profitable_strategies_db.sort(key=lambda x: x[2], reverse=True)
-    for i, (algo, strategy, profit) in enumerate(profitable_strategies_db[:10], 1):
-        logger.info(f"Rank {i}: Algorithm: {algo}, Strategy: {strategy}, Profit: {profit}")
 
 if __name__ == "__main__":
     main()
