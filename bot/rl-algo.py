@@ -6,7 +6,10 @@ from pycoingecko import CoinGeckoAPI
 import numpy as np
 from stable_baselines3 import PPO
 from gym import Env, spaces
-from ta import add_all_ta_features
+from ta.trend import SMAIndicator, MACD, ADXIndicator
+from ta.momentum import RSIIndicator, StochasticOscillator, WilliamsRIndicator
+from ta.volatility import BollingerBands, AverageTrueRange, DonchianChannel
+from ta.volume import OnBalanceVolumeIndicator, VolumeWeightedAveragePrice
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(message)s')
@@ -28,8 +31,6 @@ strategy_categories = {
     "Position Trading": {"timeframes": ['1d', '1w'], "history_limit": 500},
     "Day Trading": {"timeframes": ['15m', '1h'], "history_limit": 500},
 }
-
-# CoinGecko API data fetching with technical indicators
 def fetch_multi_timeframe_data(symbol, vs_currency='usd', timeframes=['1', '7', '30']):
     cg = CoinGeckoAPI()
     
@@ -48,15 +49,43 @@ def fetch_multi_timeframe_data(symbol, vs_currency='usd', timeframes=['1', '7', 
         df['close'] = df['price']
         df['volume'] = random.uniform(0.1, 10)  # Placeholder for volume
         
-        # Add technical indicators
-        df = add_all_ta_features(
-            df, open="open", high="high", low="low", close="close", volume="volume", fillna=True
-        )
+        # Adding indicators and filling missing values
+        df['sma_slow'] = SMAIndicator(close=df['close'], window=50).sma_indicator().fillna(0)
+        df['sma_fast'] = SMAIndicator(close=df['close'], window=20).sma_indicator().fillna(0)
+        df['macd'] = MACD(close=df['close']).macd_diff().fillna(0)
+        df['adx'] = ADXIndicator(high=df['high'], low=df['low'], close=df['close'], window=14).adx().fillna(0)
+        df['rsi'] = RSIIndicator(close=df['close'], window=14).rsi().fillna(0)
+        df['stoch'] = StochasticOscillator(high=df['high'], low=df['low'], close=df['close'], window=14).stoch().fillna(0)
+        df['williams_r'] = WilliamsRIndicator(high=df['high'], low=df['low'], close=df['close'], lbp=14).williams_r().fillna(0)
+        df['bollinger_high'] = BollingerBands(close=df['close'], window=20, window_dev=2).bollinger_hband().fillna(0)
+        df['bollinger_low'] = BollingerBands(close=df['close'], window=20, window_dev=2).bollinger_lband().fillna(0)
+        df['atr'] = AverageTrueRange(high=df['high'], low=df['low'], close=df['close'], window=14).average_true_range().fillna(0)
+        df['donchian_high'] = DonchianChannel(high=df['high'], low=df['low'], close=df['close'], window=20).donchian_channel_hband().fillna(0)
+        df['obv'] = OnBalanceVolumeIndicator(close=df['close'], volume=df['volume']).on_balance_volume().fillna(0)
+        df['mfi'] = calculate_mfi(df).fillna(0)
+        df['vwap'] = VolumeWeightedAveragePrice(high=df['high'], low=df['low'], close=df['close'], volume=df['volume'], window=14).volume_weighted_average_price().fillna(0)
 
         dfs.append(df)
     
     combined_df = pd.concat(dfs, axis=0).sort_index()
     return combined_df
+
+
+# Manual Money Flow Index (MFI) calculation
+def calculate_mfi(df, window=14):
+    typical_price = (df['high'] + df['low'] + df['close']) / 3
+    money_flow = typical_price * df['volume']
+
+    # Positive and Negative Money Flow
+    positive_flow = money_flow.where(typical_price > typical_price.shift(1), 0)
+    negative_flow = money_flow.where(typical_price < typical_price.shift(1), 0)
+
+    # Money Flow Ratio
+    money_flow_ratio = positive_flow.rolling(window=window).sum() / negative_flow.rolling(window=window).sum()
+
+    # Money Flow Index
+    mfi = 100 - (100 / (1 + money_flow_ratio))
+    return mfi
 
 # Define RL environment for trading with indicators
 class TradingEnv(Env):
@@ -73,8 +102,8 @@ class TradingEnv(Env):
         
         # Observation space: prices and technical indicators
         self.observation_space = spaces.Box(
-            low=0, high=1, shape=(10,), dtype=np.float32
-        )  # Example of adding 10 features
+            low=0, high=1, shape=(15,), dtype=np.float32  # Added 15 features including technical indicators
+        )
 
     def reset(self):
         self.current_step = 0
@@ -120,11 +149,16 @@ class TradingEnv(Env):
             self.df.iloc[self.current_step]['low'],
             self.df.iloc[self.current_step]['close'],
             self.df.iloc[self.current_step]['volume'],
-            self.df.iloc[self.current_step]['trend_sma_slow'],  # Example of moving average
-            self.df.iloc[self.current_step]['momentum_rsi'],     # RSI
-            self.df.iloc[self.current_step]['volatility_atr'],   # ATR
-            self.positions,
-            self.cash / self.starting_cash  # Normalize cash
+            self.df.iloc[self.current_step]['sma_slow'],    # Slow moving average
+            self.df.iloc[self.current_step]['rsi'],          # RSI
+            self.df.iloc[self.current_step]['bollinger_high'], # Bollinger High Band
+            self.df.iloc[self.current_step]['atr'],           # ATR
+            self.df.iloc[self.current_step]['obv'],           # On Balance Volume
+            self.df.iloc[self.current_step]['macd'],          # MACD
+            self.df.iloc[self.current_step]['stoch'],         # Stochastic Oscillator
+            self.df.iloc[self.current_step]['vwap'],          # VWAP
+            self.df.iloc[self.current_step]['adx'],           # ADX
+            self.df.iloc[self.current_step]['mfi'],           # Money Flow Index
         ]
         return np.array(obs, dtype=np.float32)
 
