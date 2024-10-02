@@ -1,5 +1,5 @@
 #!/bin/bash
-
+cat /Users/ericheilman/t.txt
 
 # Prompt for the GitHub username
 echo -n "Enter your GitHub username: "
