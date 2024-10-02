@@ -1,196 +1,161 @@
-import random
 import backtrader as bt
 import pandas as pd
-import numpy as np
-from sklearn.neural_network import MLPRegressor
-from sklearn.svm import SVR
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.model_selection import train_test_split
-from deap import base, creator, tools, algorithms
-from pycoingecko import CoinGeckoAPI
 import logging
+from pycoingecko import CoinGeckoAPI
+import numpy as np
+from stable_baselines3 import PPO
+from gym import Env, spaces
+import requests
+import random
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 logger = logging.getLogger()
 
-# File handler for logging to a file
-file_handler = logging.FileHandler('backtest.log')
+# File handler for verbose logging
+file_handler = logging.FileHandler('RL-backtest.log')
 file_handler.setLevel(logging.DEBUG)
 file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
 logger.addHandler(file_handler)
 
-# Example trading categories with timeframes
+# Placeholder for profitable strategies, just for tracking
+profitable_strategies_db = []
+
+# API configuration
+API_KEY = 'CG-SwSx6aTNiJDmG1TiXVMGHPbg'
+
+# Strategy categories (multi-timeframe)
 strategy_categories = {
-    "Scalping": {"timeframe": "1m", "history_limit": 5000},
-    "Swing Trading": {"timeframe": "1h", "history_limit": 1000},
-    "Position Trading": {"timeframe": "1d", "history_limit": 365},
-    "Day Trading": {"timeframe": "15m", "history_limit": 2000},
+    "Scalping": {"timeframes": ['1m', '5m'], "history_limit": 500},
+    "Swing Trading": {"timeframes": ['1h', '4h'], "history_limit": 500},
+    "Position Trading": {"timeframes": ['1d', '1w'], "history_limit": 500},
+    "Day Trading": {"timeframes": ['15m', '1h'], "history_limit": 500},
 }
 
-# Function to fetch data (this uses dummy data for backtesting purposes)
-def fetch_data(symbol, timeframe, limit):
-    freq_map = {'1m': 'T', '15m': '15T', '1h': 'H', '1d': 'D'}
-    dates = pd.date_range(start="2023-01-01", periods=limit, freq=freq_map[timeframe])
-    prices = np.random.normal(loc=100, scale=10, size=limit)
+# CoinGecko API data fetching
+def fetch_multi_timeframe_data(symbol, vs_currency='usd', timeframes=['1', '7', '30']):
+    cg = CoinGeckoAPI()
     
-    df = pd.DataFrame({"timestamp": dates, "open": prices, "high": prices * 1.02, "low": prices * 0.98, "close": prices})
-    df.set_index("timestamp", inplace=True)
-    
-    return df
+    # Convert symbol to lowercase to match CoinGecko format
+    symbol = symbol.lower()
 
-# Backtest a strategy using Backtrader
-def backtest_strategy(strategy, df):
-    cerebro = bt.Cerebro()
+    dfs = []
+    for days in timeframes:
+        logger.debug(f"Fetching {days} days of data for {symbol}")
+        
+        # Fetch historical market data from CoinGecko
+        historical_data = cg.get_coin_market_chart_by_id(id=symbol, vs_currency=vs_currency, days=days)
+        
+        # Create a DataFrame from the price data
+        df = pd.DataFrame(historical_data['prices'], columns=['timestamp', 'price'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df.set_index('timestamp', inplace=True)
 
-    class TestStrategy(bt.Strategy):
-        params = (
-            ('macd_fast', 12),
-            ('macd_slow', 26),
-            ('macd_signal', 9),
-            ('rsi_overbought', 70),
-            ('rsi_oversold', 30),
-            ('adx_threshold', 25),
-            ('ema_period', 20),
-            ('bb_period', 20),
-            ('stoch_k', 14),
-            ('stoch_d', 3),
-        )
+        # Add open, high, low, close, and volume columns to match Backtrader's expected format
+        df['open'] = df['price']
+        df['high'] = df['price'] * 1.02  # Simulated high
+        df['low'] = df['price'] * 0.98  # Simulated low
+        df['close'] = df['price']
+        df['volume'] = random.uniform(0.1, 10)  # Placeholder for volume
 
-        def __init__(self):
-            self.macd = bt.indicators.MACD(
-                period_me1=self.params.macd_fast,
-                period_me2=self.params.macd_slow,
-                period_signal=self.params.macd_signal
-            )
-            self.rsi = bt.indicators.RSI_Safe()
-            self.bb = bt.indicators.BollingerBands(period=self.params.bb_period)
-            self.adx = bt.indicators.ADX()
-            self.ema = bt.indicators.EMA(period=self.params.ema_period)
-            self.stochastic = bt.indicators.Stochastic(
-                self.data, 
-                period=self.params.stoch_k, 
-                period_dfast=self.params.stoch_d
-            )
+        dfs.append(df)
 
-        def next(self):
-            if self.rsi[0] < self.params.rsi_oversold and self.adx[0] > self.params.adx_threshold:
-                self.buy()
-            elif self.rsi[0] > self.params.rsi_overbought and self.adx[0] > self.params.adx_threshold:
-                self.sell()
+    # Combine the dataframes from multiple timeframes into one DataFrame
+    combined_df = pd.concat(dfs, axis=0).sort_index()
+    return combined_df
 
-            if self.data.close[0] > self.bb.lines.top[0]:
-                self.sell()
-            elif self.data.close[0] < self.bb.lines.bot[0]:
-                self.buy()
+# Define RL environment for trading
+class TradingEnv(Env):
+    def __init__(self, df):
+        super(TradingEnv, self).__init__()
+        self.df = df
+        self.current_step = 0
+        self.starting_cash = 10000
+        self.cash = self.starting_cash
+        self.positions = 0
 
-    data = bt.feeds.PandasData(dataname=df)
-    cerebro.adddata(data)
-    cerebro.addstrategy(TestStrategy)
-    cerebro.broker.set_cash(10000)
-    cerebro.run()
-    
-    return cerebro.broker.getvalue() - 10000  # Return profit
+        # Define the action space (Buy, Sell, Hold)
+        self.action_space = spaces.Discrete(3)  # 0: hold, 1: buy, 2: sell
+        
+        # Observation space is a vector of prices + indicators (normalized)
+        self.observation_space = spaces.Box(low=0, high=1, shape=(6,), dtype=np.float32)
 
-# Define the GA for optimizing the strategy
-def setup_ga():
-    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
-    creator.create("Individual", list, fitness=creator.FitnessMax)
+    def reset(self):
+        self.current_step = 0
+        self.cash = self.starting_cash
+        self.positions = 0
+        return self._get_observation()
 
-    toolbox = base.Toolbox()
-    toolbox.register("attr_macd_fast", random.randint, 6, 15)
-    toolbox.register("attr_macd_slow", random.randint, 20, 30)
-    toolbox.register("attr_macd_signal", random.randint, 5, 12)
-    toolbox.register("attr_rsi_overbought", random.randint, 60, 80)
-    toolbox.register("attr_rsi_oversold", random.randint, 20, 40)
-    toolbox.register("attr_adx_threshold", random.randint, 20, 35)
-    toolbox.register("attr_ema_period", random.randint, 5, 50)
-    toolbox.register("attr_bb_period", random.randint, 5, 50)
-    toolbox.register("attr_stoch_k", random.randint, 5, 20)
-    toolbox.register("attr_stoch_d", random.randint, 3, 10)
+    def step(self, action):
+        current_price = self.df.iloc[self.current_step]['close']
+        reward = 0
+        
+        if action == 1:  # Buy
+            if self.cash >= current_price:
+                self.positions += 1
+                self.cash -= current_price
+                logger.debug(f"Buy at {current_price}")
+        
+        elif action == 2:  # Sell
+            if self.positions > 0:
+                self.positions -= 1
+                self.cash += current_price
+                logger.debug(f"Sell at {current_price}")
+                reward = (self.cash + (self.positions * current_price)) - self.starting_cash
 
-    toolbox.register("individual", tools.initCycle, creator.Individual, 
-                     (toolbox.attr_macd_fast, toolbox.attr_macd_slow, toolbox.attr_macd_signal, 
-                      toolbox.attr_rsi_overbought, toolbox.attr_rsi_oversold, toolbox.attr_adx_threshold, 
-                      toolbox.attr_ema_period, toolbox.attr_bb_period,
-                      toolbox.attr_stoch_k, toolbox.attr_stoch_d), n=1)
+        self.current_step += 1
 
-    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
-    toolbox.register("evaluate", evaluate_ga_strategy)
-    toolbox.register("mate", tools.cxTwoPoint)
-    toolbox.register("mutate", tools.mutFlipBit, indpb=0.05)
-    toolbox.register("select", tools.selTournament, tournsize=3)
+        done = self.current_step >= len(self.df) - 1
+        obs = self._get_observation()
 
-    return toolbox
+        # Calculate net worth
+        net_worth = self.cash + self.positions * current_price
+        reward += (net_worth - self.starting_cash) / self.starting_cash  # Reward as a return on investment
 
-# Evaluate strategy generated by GA
-def evaluate_ga_strategy(individual):
-    strategy = {
-        'macd_fast': individual[0],
-        'macd_slow': individual[1],
-        'macd_signal': individual[2],
-        'rsi_overbought': individual[3],
-        'rsi_oversold': individual[4],
-        'adx_threshold': individual[5],
-        'ema_period': individual[6],
-        'bb_period': individual[7],
-        'stoch_k': individual[8],
-        'stoch_d': individual[9],
-    }
-    
-    df = fetch_data(symbol='SOL/USDT', timeframe='1m', limit=5000)
-    profit = backtest_strategy(strategy, df)
-    
-    return profit,
+        return obs, reward, done, {}
 
-# Run GA and backtest for each trading category
-def run_category_backtests():
-    all_results = []
+    def _get_observation(self):
+        obs = [
+            self.df.iloc[self.current_step]['open'],
+            self.df.iloc[self.current_step]['high'],
+            self.df.iloc[self.current_step]['low'],
+            self.df.iloc[self.current_step]['close'],
+            self.positions,
+            self.cash / self.starting_cash  # Normalize cash
+        ]
+        return np.array(obs, dtype=np.float32)
 
-    for category, params in strategy_categories.items():
-        print(f"\nRunning backtests for {category}...")
+# Backtest strategy using RL
+def backtest_rl_strategy(df, symbol):
+    env = TradingEnv(df)
+    model = PPO('MlpPolicy', env, verbose=1)
 
-        df = fetch_data(symbol='SOL/USDT', timeframe=params['timeframe'], limit=params['history_limit'])
+    # Train the model with enough steps
+    model.learn(total_timesteps=100000)
 
-        toolbox = setup_ga()
-        population = toolbox.population(n=100)
-        algorithms.eaSimple(population, toolbox, cxpb=0.5, mutpb=0.2, ngen=10, verbose=False)
+    # Run the model to test performance
+    obs = env.reset()
+    done = False
+    while not done:
+        action, _states = model.predict(obs)
+        obs, reward, done, info = env.step(action)
 
-        for ind in population:
-            strategy = {
-                'macd_fast': ind[0],
-                'macd_slow': ind[1],
-                'macd_signal': ind[2],
-                'rsi_overbought': ind[3],
-                'rsi_oversold': ind[4],
-                'adx_threshold': ind[5],
-                'ema_period': ind[6],
-                'bb_period': ind[7],
-                'stoch_k': ind[8],
-                'stoch_d': ind[9],
-            }
-            profit = backtest_strategy(strategy, df)
-            all_results.append((strategy, profit))
+    net_worth = env.cash + env.positions * df.iloc[env.current_step]['close']
+    profit = net_worth - env.starting_cash
+    logger.info(f"Profit for {symbol}: {profit}")
+    return profit
 
-    return all_results
-
-# Main function to run everything
+# Main function to run the backtesting with RL
 def main():
-    all_results = run_category_backtests()
+    logger.info("Starting Reinforcement Learning strategy backtesting...")
+    symbol = 'solana'  # Replace with desired asset
 
-    # Prepare data for AI model training
-    df = pd.DataFrame([r[0] for r in all_results])
-    df['profit'] = [r[1] for r in all_results]
+    # Fetch data for the symbol
+    df = fetch_multi_timeframe_data(symbol=symbol, timeframes=['1', '7', '30'])
 
-    X = df.drop(columns=['profit'])
-    y = df['profit']
-
-    ai_results = train_ai_models(X, y)
-
-    # Print AI model results
-    print("\nAI Model Performance:")
-    for model_name, score in ai_results.items():
-        print(f"{model_name}: {score}")
+    # Backtest the strategy using RL
+    profit = backtest_rl_strategy(df, symbol)
+    logger.info(f"Final profit from RL strategy: {profit}")
 
 if __name__ == "__main__":
     main()

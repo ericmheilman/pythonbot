@@ -2,30 +2,26 @@ import random
 import backtrader as bt
 import pandas as pd
 import logging
-import requests
 from pycoingecko import CoinGeckoAPI
 import numpy as np
-from stable_baselines3 import DQN  # DQN RL algorithm from Stable Baselines3
+from stable_baselines3 import PPO
 from gym import Env, spaces
-from pycoingecko import CoinGeckoAPI
+from ta import add_all_ta_features
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 logger = logging.getLogger()
 
 # File handler for verbose logging
-file_handler = logging.FileHandler('backtest.log')
+file_handler = logging.FileHandler('RL-backtest.log')
 file_handler.setLevel(logging.DEBUG)
 file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
 logger.addHandler(file_handler)
 
-# API Key for CoinGecko (replace with your own)
+# CoinGecko API configuration
 API_KEY = 'CG-SwSx6aTNiJDmG1TiXVMGHPbg'
 
-# Placeholder to store profitable strategies
-profitable_strategies_db = []
-
-# Strategy categories
+# Strategy categories (multi-timeframe)
 strategy_categories = {
     "Scalping": {"timeframes": ['1m', '5m'], "history_limit": 500},
     "Swing Trading": {"timeframes": ['1h', '4h'], "history_limit": 500},
@@ -33,39 +29,36 @@ strategy_categories = {
     "Day Trading": {"timeframes": ['15m', '1h'], "history_limit": 500},
 }
 
-# Function to pull data for multiple timeframes
+# CoinGecko API data fetching with technical indicators
 def fetch_multi_timeframe_data(symbol, vs_currency='usd', timeframes=['1', '7', '30']):
     cg = CoinGeckoAPI()
     
-    # Convert symbol to lowercase to match CoinGecko format
     symbol = symbol.lower()
-
     dfs = []
+    
     for days in timeframes:
         logger.debug(f"Fetching {days} days of data for {symbol}")
-        
-        # Fetch historical market data from CoinGecko
         historical_data = cg.get_coin_market_chart_by_id(id=symbol, vs_currency=vs_currency, days=days)
-        
-        # Create a DataFrame from the price data
         df = pd.DataFrame(historical_data['prices'], columns=['timestamp', 'price'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         df.set_index('timestamp', inplace=True)
-
-        # Add open, high, low, close, and volume columns to match Backtrader's expected format
         df['open'] = df['price']
-        df['high'] = df['price']
-        df['low'] = df['price']
+        df['high'] = df['price'] * 1.02
+        df['low'] = df['price'] * 0.98
         df['close'] = df['price']
-        df['volume'] = 1  # Placeholder
+        df['volume'] = random.uniform(0.1, 10)  # Placeholder for volume
+        
+        # Add technical indicators
+        df = add_all_ta_features(
+            df, open="open", high="high", low="low", close="close", volume="volume", fillna=True
+        )
 
         dfs.append(df)
-
-    # Combine the dataframes from multiple timeframes into one DataFrame
+    
     combined_df = pd.concat(dfs, axis=0).sort_index()
     return combined_df
 
-# Define RL environment for trading
+# Define RL environment for trading with indicators
 class TradingEnv(Env):
     def __init__(self, df):
         super(TradingEnv, self).__init__()
@@ -75,11 +68,13 @@ class TradingEnv(Env):
         self.cash = self.starting_cash
         self.positions = 0
 
-        # Define the action space (Buy, Sell, Hold)
-        self.action_space = spaces.Discrete(3)  # 0: hold, 1: buy, 2: sell
+        # Action space: 0: hold, 1: buy, 2: sell
+        self.action_space = spaces.Discrete(3)
         
-        # Observation space is a vector of prices + indicators (normalized)
-        self.observation_space = spaces.Box(low=0, high=1, shape=(6,), dtype=np.float32)
+        # Observation space: prices and technical indicators
+        self.observation_space = spaces.Box(
+            low=0, high=1, shape=(10,), dtype=np.float32
+        )  # Example of adding 10 features
 
     def reset(self):
         self.current_step = 0
@@ -90,7 +85,7 @@ class TradingEnv(Env):
     def step(self, action):
         current_price = self.df.iloc[self.current_step]['close']
         reward = 0
-        
+
         if action == 1:  # Buy
             if self.cash >= current_price:
                 self.positions += 1
@@ -105,13 +100,16 @@ class TradingEnv(Env):
                 reward = (self.cash + (self.positions * current_price)) - self.starting_cash
 
         self.current_step += 1
-
         done = self.current_step >= len(self.df) - 1
         obs = self._get_observation()
 
         # Calculate net worth
         net_worth = self.cash + self.positions * current_price
-        reward += (net_worth - self.starting_cash) / self.starting_cash  # Reward as a return on investment
+        reward += (net_worth - self.starting_cash) / self.starting_cash
+
+        # Add reward based on drawdown to penalize high-risk behavior
+        if reward < 0:
+            reward -= 0.01 * abs(reward)
 
         return obs, reward, done, {}
 
@@ -121,6 +119,10 @@ class TradingEnv(Env):
             self.df.iloc[self.current_step]['high'],
             self.df.iloc[self.current_step]['low'],
             self.df.iloc[self.current_step]['close'],
+            self.df.iloc[self.current_step]['volume'],
+            self.df.iloc[self.current_step]['trend_sma_slow'],  # Example of moving average
+            self.df.iloc[self.current_step]['momentum_rsi'],     # RSI
+            self.df.iloc[self.current_step]['volatility_atr'],   # ATR
             self.positions,
             self.cash / self.starting_cash  # Normalize cash
         ]
@@ -129,10 +131,10 @@ class TradingEnv(Env):
 # Backtest strategy using RL
 def backtest_rl_strategy(df, symbol):
     env = TradingEnv(df)
-    model = DQN('MlpPolicy', env, verbose=1)
+    model = PPO('MlpPolicy', env, verbose=1)
 
-    # Train the model
-    model.learn(total_timesteps=50000)
+    # Train the model with extended steps
+    model.learn(total_timesteps=200000)
 
     # Run the model to test performance
     obs = env.reset()
